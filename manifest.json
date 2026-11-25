@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini 额度悬浮卡片",
+  "version": "0.3.1",
+  "description": "在 Gemini 聊天页以可拖动的悬浮卡片显示官方用量和重置时间。",
+  "permissions": ["storage"],
+  "content_scripts": [
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": ["usage.js", "widget.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
