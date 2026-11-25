@@ -10,17 +10,28 @@ const userscriptSource = () => readFileSync(require.resolve('../gemini-web-usage
 const key = 'geminiUsageWidgetPosition';
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-function node() {
+function node(tag, namespace) {
   const handlers = new Map();
   const attrs = new Map();
   return {
-    attrs,
+    tag, namespace, attrs, children: [], style: {}, dataset: {},
+    set innerHTML(_) { throw new TypeError('This document requires TrustedHTML assignment'); },
+    append(...children) {
+      for (const child of children) {
+        if (typeof child !== 'string') child.parentNode = this;
+        this.children.push(child);
+      }
+    },
     addEventListener: (type, handler) => handlers.set(type, handler),
     fire: (type, event) => handlers.get(type)?.(event),
     setPointerCapture(id) { this.captured = id; },
     setAttribute: (name, value) => attrs.set(name, value),
     toggleAttribute: (name, value) => value ? attrs.set(name, '') : attrs.delete(name),
   };
+}
+
+function allElements(root) {
+  return [root, ...root.children.filter(child => typeof child !== 'string').flatMap(allElements)];
 }
 
 function fixture(current, weekly) {
@@ -33,24 +44,8 @@ function fixture(current, weekly) {
 
 async function mount({ saved, path = '/app/abc', visible = false, snapshots = [], reducedMotion = false,
   userscript = false, existingWidget = false } = {}) {
-  const handle = node();
-  const header = node();
-  const button = node();
   const animations = [];
-  const nodes = { '#drag': handle, '#refresh': button, header };
-  for (const pool of ['current', 'weekly']) {
-    const row = { strong: {}, '.fill': { style: {}, dataset: {} }, time: {} };
-    nodes[`[data-pool="${pool}"]`] = { querySelector: selector => row[selector] };
-    nodes[`[data-pool="${pool}"] .delta`] = {
-      ...node(),
-      animate(frames, options) {
-        const animation = { cancel() { this.cancelled = true; } };
-        animations.push({ pool, text: this.textContent, frames, options, animation, badge: this });
-        return animation;
-      },
-    };
-  }
-  const shadow = { querySelector: selector => nodes[selector] ?? {} };
+  const shadow = node('#shadow-root');
   const host = {
     isConnected: false, style: {}, offsetWidth: 220, offsetHeight: 140,
     attachShadow: () => shadow,
@@ -60,7 +55,20 @@ async function mount({ saved, path = '/app/abc', visible = false, snapshots = []
   const requests = [];
   const root = { clientWidth: 800, clientHeight: 600 };
   const window = { ...node(), matchMedia: () => ({ matches: reducedMotion }) };
-  const document = { ...node(), hidden: !visible, documentElement: root, createElement: () => host,
+  function createElement(tag) {
+    if (tag === 'gemini-usage-widget') return host;
+    const element = node(tag);
+    element.animate = function (frames, options) {
+      let row = this.parentNode;
+      while (row && !row.attrs.has('data-pool')) row = row.parentNode;
+      const animation = { cancel() { this.cancelled = true; } };
+      animations.push({ pool: row?.attrs.get('data-pool'), text: this.textContent, frames, options, animation, badge: this });
+      return animation;
+    };
+    return element;
+  }
+  const document = { ...node(), hidden: !visible, documentElement: root, createElement,
+    createElementNS: (namespace, tag) => node(tag, namespace),
     querySelector: selector => selector === 'gemini-usage-widget' && existingWidget ? {} : null,
     body: { append: element => { element.isConnected = true; } } };
   const location = { href: `https://gemini.google.com${path}` };
@@ -76,6 +84,7 @@ async function mount({ saved, path = '/app/abc', visible = false, snapshots = []
   };
   vm.runInNewContext(userscript ? userscriptSource() : source, {
     ...platform, window, location, document, AbortController, URL,
+    CSSStyleSheet: class { replaceSync(css) { this.css = css; } },
     ResizeObserver: class { observe() {} },
     MutationObserver: class { observe() {} },
     requestAnimationFrame: callback => callback(),
@@ -89,7 +98,11 @@ async function mount({ saved, path = '/app/abc', visible = false, snapshots = []
     },
   });
   await settle();
-  return { handle, header, button, host, calls, root, window, location, document, requests, animations,
+  const elements = allElements(shadow);
+  const handle = elements.find(el => el.attrs.get('id') === 'drag');
+  const header = elements.find(el => el.tag === 'header');
+  const button = elements.find(el => el.attrs.get('id') === 'refresh');
+  return { handle, header, button, host, shadow, elements, calls, root, window, location, document, requests, animations,
     async advance(ms) {
       const end = now + ms;
       for (;;) {
@@ -213,6 +226,18 @@ test('the standalone userscript polls, animates, and persists position without C
   await advance(30_000);
   assert.deepEqual(requests.map(({ at }) => at), [0, 30_000]);
   assert.deepEqual(animations.map(a => [a.pool, a.text]), [['current', '+5%'], ['weekly', '+1%']]);
+});
+
+test('the userscript creates and styles its card when Trusted Types blocks innerHTML', async () => {
+  const { host, shadow, button, elements, requests } = await mount({ userscript: true, visible: true, snapshots: [[23, 3]] });
+  assert.throws(() => { shadow.innerHTML = '<div>rejected</div>'; }, /TrustedHTML/);
+  assert.equal(host.isConnected, true);
+  assert.match(shadow.adoptedStyleSheets[0].css, /position:fixed/);
+  assert.equal(button.children[0].namespace, 'http://www.w3.org/2000/svg');
+  assert.equal(elements.find(el => el.attrs.get('id') === 'pools').hidden, false);
+  assert.ok(elements.some(el => el.textContent === '23% 已用'));
+  assert.ok(elements.some(el => el.textContent === '3% 已用'));
+  assert.equal(requests.length, 1);
 });
 
 test('a second installation does not mount a duplicate widget or poll', async () => {

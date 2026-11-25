@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini 额度悬浮卡片
 // @namespace    https://github.com/bakapiano/gemini_web_usage
-// @version      0.3.1
+// @version      0.3.2
 // @description  在 Gemini 聊天页以可拖动的悬浮卡片显示官方用量和重置时间。
 // @match        https://gemini.google.com/*
 // @run-at       document-idle
@@ -132,8 +132,8 @@
     const timeFormat = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' });
     const host = document.createElement(widgetTag);
     const shadow = host.attachShadow({ mode: 'closed' });
-    shadow.innerHTML = `
-      <style>
+    const styles = new CSSStyleSheet();
+    styles.replaceSync(`
         :host {
           position:fixed; right:${inset}px; bottom:${inset}px; z-index:1000; display:block;
           width:min(220px, calc(100% - ${inset * 2}px));
@@ -169,28 +169,52 @@
         .fill[data-near="true"] { background:#e87c36; }
         time, #status { opacity:.78; }
         footer { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px; margin-top:6px; font-size:11px; }
-      </style>
-      <section aria-label="Gemini 使用额度">
-        <header>
-          <button id="drag" type="button" aria-label="移动 Gemini 额度卡片" title="拖动或用方向键移动；Home 回到右下角"><span aria-hidden="true">⠿</span><strong>Gemini 额度</strong></button>
-          <button id="refresh" type="button" aria-label="刷新 Gemini 额度">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 4v5h-5m5 0a8 8 0 1 0 .3 5"/></svg>
-            刷新
-          </button>
-        </header>
-        <div id="pools" hidden>
-          <div class="row" data-pool="current"><div class="label"><span>5 小时</span><span class="value"><strong></strong><span class="delta" aria-hidden="true"></span></span></div><div class="bar" aria-hidden="true"><div class="fill"></div></div><time></time></div>
-          <div class="row" data-pool="weekly"><div class="label"><span>每周</span><span class="value"><strong></strong><span class="delta" aria-hidden="true"></span></span></div><div class="bar" aria-hidden="true"><div class="fill"></div></div><time></time></div>
-        </div>
-        <footer><span id="status" role="status"></span><a target="_blank" rel="noopener">官方用量页 ↗</a></footer>
-      </section>`;
+    `);
+    shadow.adoptedStyleSheets = [styles];
 
-    const button = shadow.querySelector('#refresh');
-    const handle = shadow.querySelector('#drag');
-    const header = shadow.querySelector('header');
-    const pools = shadow.querySelector('#pools');
-    const status = shadow.querySelector('#status');
-    const link = shadow.querySelector('a');
+    // Gemini enforces Trusted Types in the userscript's execution world. Build
+    // actual nodes, including the SVG, without parsing HTML or creating a policy.
+    function element(tag, attrs, ...children) {
+      const node = document.createElement(tag);
+      for (const [name, value] of Object.entries(attrs ?? {})) node.setAttribute(name, value);
+      node.append(...children);
+      return node;
+    }
+
+    function refreshIcon() {
+      const ns = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(ns, 'svg');
+      const attrs = {
+        viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2',
+        'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
+      };
+      for (const [name, value] of Object.entries(attrs)) svg.setAttribute(name, value);
+      const path = document.createElementNS(ns, 'path');
+      path.setAttribute('d', 'M20 4v5h-5m5 0a8 8 0 1 0 .3 5');
+      svg.append(path);
+      return svg;
+    }
+
+    const handle = element('button', {
+      id: 'drag', type: 'button', 'aria-label': '移动 Gemini 额度卡片', title: '拖动或用方向键移动；Home 回到右下角',
+    }, element('span', { 'aria-hidden': 'true' }, '⠿'), element('strong', null, 'Gemini 额度'));
+    const button = element('button', { id: 'refresh', type: 'button', 'aria-label': '刷新 Gemini 额度' }, refreshIcon(), '刷新');
+    const header = element('header', null, handle, button);
+    const pools = element('div', { id: 'pools', hidden: '' });
+    const poolElements = {};
+    for (const [key, title] of [['current', '5 小时'], ['weekly', '每周']]) {
+      const value = element('strong');
+      const badge = element('span', { class: 'delta', 'aria-hidden': 'true' });
+      const fill = element('div', { class: 'fill' });
+      const time = element('time');
+      poolElements[key] = { value, badge, fill, time };
+      pools.append(element('div', { class: 'row', 'data-pool': key },
+        element('div', { class: 'label' }, element('span', null, title), element('span', { class: 'value' }, value, badge)),
+        element('div', { class: 'bar', 'aria-hidden': 'true' }, fill), time));
+    }
+    const status = element('span', { id: 'status', role: 'status' });
+    const link = element('a', { target: '_blank', rel: 'noopener' }, '官方用量页 ↗');
+    shadow.append(element('section', { 'aria-label': 'Gemini 使用额度' }, header, pools, element('footer', null, status, link)));
     const activeDeltas = new Map();
     let accountUrl = null;
     let running = null;
@@ -300,12 +324,10 @@
       if (!data) return;
       for (const key of poolKeys) {
         const { used, resetsAt } = data[key];
-        const row = shadow.querySelector(`[data-pool="${key}"]`);
-        row.querySelector('strong').textContent = `${used}% 已用`;
-        const fill = row.querySelector('.fill');
+        const { value, fill, time } = poolElements[key];
+        value.textContent = `${used}% 已用`;
         fill.style.width = `${Math.min(used, 100)}%`;
         fill.dataset.near = String(used >= 85);
-        const time = row.querySelector('time');
         time.dateTime = new Date(resetsAt).toISOString();
         time.textContent = `重置：${dateFormat.format(resetsAt)}`;
       }
@@ -317,7 +339,7 @@
       for (const key of poolKeys) {
         const delta = next[key].used - previous[key].used;
         if (!delta) continue;
-        const badge = shadow.querySelector(`[data-pool="${key}"] .delta`);
+        const { badge } = poolElements[key];
         activeDeltas.get(key)?.cancel();
         badge.textContent = `${delta > 0 ? '+' : '−'}${Math.abs(delta)}%`;
         badge.toggleAttribute('data-down', delta < 0);
